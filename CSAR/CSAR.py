@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from glob import glob
 from datetime import datetime
 from uncertainties import ufloat, unumpy
+from scipy.optimize import curve_fit
 #%% Lector Templog
 def lector_templog(path):
     '''
@@ -57,7 +58,7 @@ T_agua_eq = round(np.mean(T_agua[mask]),1)
 print(f"Temperatura media del agua desde t=1000 s: {T_agua_eq} °C")
 
 fig, ax=plt.subplots(figsize=(8,4),constrained_layout=True)
-ax.plot(t_agua_0,T_agua,label='Agua')
+ax.plot(t_agua_0,T_agua,'.-',label='Agua')
 ax.axhline(T_agua_eq,0,1,c='tab:red',ls='--',label='T$_{eq}$ = '+f'{T_agua_eq:.1f} °C')
 ax.grid()
 ax.set_xlim(0,t_agua_0[-1])
@@ -174,9 +175,9 @@ def ajustes_alrededor_Teq(Teq, t, T,label ,x=1.0):
     
     return dict_lin
 #%%
-def ajustes_lineal_T_arbitraria(Tcentral, t, T,label ,x=1.0):
+def ajustes_lineal_T_arbitraria(Tcentral, t, T, label, x=1.0):
     """
-    Realiza ajustes lineal alrededor de Tcentral ± x.
+    Realiza ajustes lineal alrededor de Tcentral ± x usando curve_fit.
     
     Args:
         Tcentral (float): Temperatura de equilibrio
@@ -188,54 +189,71 @@ def ajustes_lineal_T_arbitraria(Tcentral, t, T,label ,x=1.0):
         tuple: (dict_lin, dict_exp) donde:
             - dict_lin: Diccionario con resultados del ajuste lineal
     """
+    # Definir la función lineal para curve_fit
+    def linear_func(x, a, b):
+        return a * x + b
+    
     # Crear máscara para el intervalo de interés
     mask = (T >= Tcentral - x) & (T <= Tcentral + x)
     t_interval = t[mask]
     T_interval = T[mask]
     
-    # Ajuste lineal
-    coeff_lin = np.polyfit(t_interval, T_interval, 1)
-    poly_lin = np.poly1d(coeff_lin)
-    r2_lin = np.corrcoef(T_interval, poly_lin(t_interval))[0,1]**2
+    # Ajuste lineal con curve_fit
+    popt, pcov = curve_fit(linear_func, t_interval, T_interval)
+    perr = np.sqrt(np.diag(pcov))  # Desviaciones estándar de los parámetros
+    
+    # Crear función de ajuste
+    poly_lin = lambda x: linear_func(x, *popt)
+    
+    # Calcular R²
+    residuals = T_interval - poly_lin(t_interval)
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((T_interval - np.mean(T_interval))**2)
+    r2_lin = 1 - (ss_res / ss_tot)
+    
     t_fine = np.linspace(t_interval.min()-80, t_interval.max()+80, 100)
+    
+    # Crear ufloat para la pendiente con su incertidumbre
+    pendiente_ufloat = ufloat(popt[0], perr[0])
     
     # Preparar diccionario para resultados lineales
     dict_lin = {
-        'pendiente': coeff_lin[0],
-        'ordenada': coeff_lin[1],
+        'pendiente': pendiente_ufloat,
+        'ordenada': ufloat(popt[1], perr[1]),
         'r2': r2_lin,
         't_interval': t_interval,
         'T_interval': T_interval,
         'funcion': poly_lin,
-        'ecuacion': f"{coeff_lin[0]:.3f}t + {coeff_lin[1]:.3f}",
+        'ecuacion': f"({popt[0]:.3f}±{perr[0]:.3f})t + ({popt[1]:.3f}±{perr[1]:.3f})",
         'rango_x': x,
-        'AL_t':t_fine,
-        'AL_T':poly_lin(t_fine)
-        }
+        'AL_t': t_fine,
+        'AL_T': poly_lin(t_fine),
+        'covarianza': pcov
+    }
     
     # Crear figura 
     fig, ax = plt.subplots(figsize=(8,6), constrained_layout=True)
     ax.plot(t, T, '.-', label=label)
     
     # Plotear ajustes con el rango extendido que definiste
-    ax.plot(t_fine, poly_lin(t_fine), '-',c='tab:green',lw=2, 
+    ax.plot(t_fine, poly_lin(t_fine), '-', c='tab:green', lw=2, 
             label=f'Ajuste lineal: {dict_lin["ecuacion"]} (R²={r2_lin:.3f})')
 
-    ax.axhspan(Tcentral-x, Tcentral+x, 0, 1, color='tab:red', alpha=0.3, label='T$_{eq}\pm\Delta T$ ='+ f' {T_agua_eq} $\pm$ {x} ºC')
+    ax.axhspan(Tcentral-x, Tcentral+x, 0, 1, color='tab:red', alpha=0.3, 
+               label='T$_{eq}\pm\Delta T$ ='+ f' {Tcentral} $\pm$ {x} ºC')
     
     ax.set_xlabel('t (s)')
     ax.set_ylabel('T (°C)')
     ax.grid()
     ax.legend()
-    #ax.set_xlim(400, 600)
-    #ax.set_ylim(T_interval[0]-3, T_interval[-1]+3)
     plt.show()
 
     # Imprimir resultados (manteniendo tu formato)
     print("\nResultados del ajuste lineal:")
-    print(f"Pendiente: {dict_lin['pendiente']:.5f} °C/s")
-    print(f"Ordenada: {dict_lin['ordenada']:.5f} °C")
+    print(f"Pendiente: {dict_lin['pendiente']} °C/s")
+    print(f"Ordenada: {dict_lin['ordenada']} °C")
     print(f"Coeficiente R²: {dict_lin['r2']:.5f}")
+    
     
     return dict_lin
 #%%# Resultados 
@@ -245,12 +263,12 @@ resultados_FF2 = ajustes_lineal_T_arbitraria(25.0, t_FF2_0, T_FF2,'FF2', x=5.0)
 #%%
 concentracion=ufloat(8.2,0.4)
 dTdt_lineal_promedio=np.mean([resultados_FF1['pendiente'],resultados_FF2['pendiente']])
-print(f'Pendiente promedio = {dTdt_lineal_promedio:.4f} ºC/s')
+print(f'Pendiente promedio = {dTdt_lineal_promedio:.5f} ºC/s')
 CSAR_lineal = dTdt_lineal_promedio*4.186e3/concentracion
 print(f'CSAR = {CSAR_lineal:.0f} W/g (ajuste lineal)')
 
 
-# # %%
+#%%
 # fig, ax=plt.subplots(figsize=(10,5),constrained_layout=True)
 # ax.plot(t_FF1_0,T_FF1,label='FF1',c='C0')
 # ax.scatter(t_FF1_0[indx_cruce_FF1[0]],T_FF1[indx_cruce_FF1[0]],c='C0')
